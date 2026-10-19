@@ -193,6 +193,44 @@ def test_exclusivity_guard_rejects_cronjob_with_gated_destination_present():
     _check_exclusivity(guarded_allow, task_destinations={"linear": True})
 
 
+def test_exclusivity_guard_composed_with_mixed_auto_execute_tasks_end_to_end():
+    """R1-LOW-1: the composed path — config.task_destinations_ungated's OR across mixed
+    auto_execute tasks for the same destination, feeding straight into
+    _check_exclusivity — not just each half tested in isolation."""
+    from hourglass.config import Task, task_destinations_ungated
+    from hourglass.toolset import _check_exclusivity
+
+    guarded_allow = Allowlist(
+        builtin={"cronjob"},
+        mcp={"linear": {LINEAR_TOOLS[0]}},
+        gated_live_tools={"linear": {LINEAR_TOOLS[0]}},
+    )
+
+    # One task on "linear" has auto_execute: false, a sibling task on the same
+    # destination has auto_execute: true -> OR resolves to True for the whole run,
+    # so cronjob is allowed alongside it (REQ-7 edge case: run-scoped, not task-scoped).
+    mixed_tasks = [
+        Task(task_id="a", destination="linear", auto_execute=False),
+        Task(task_id="b", destination="linear", auto_execute=True),
+    ]
+    destinations = task_destinations_ungated(mixed_tasks)
+    assert destinations == {"linear": True}
+    _check_exclusivity(guarded_allow, task_destinations=destinations)  # must not raise
+
+    # Flip both to auto_execute: false -> OR resolves to False -> cronjob rejected.
+    all_false_tasks = [
+        Task(task_id="a", destination="linear", auto_execute=False),
+        Task(task_id="b", destination="linear", auto_execute=False),
+    ]
+    destinations_false = task_destinations_ungated(all_false_tasks)
+    assert destinations_false == {"linear": False}
+    try:
+        _check_exclusivity(guarded_allow, task_destinations=destinations_false)
+        assert False, "expected ToolsetGateError"
+    except ToolsetGateError:
+        pass
+
+
 def test_verify_gate_passes_on_exact_match():
     fake = FakeHermes()
     enum = enumerate_live("probe", fake)

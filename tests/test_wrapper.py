@@ -300,3 +300,32 @@ def test_req4_linear_destination_is_flagged_manual_never_silently_passed():
         text = log_path.read_text()
         assert "manual verification" in text.lower()
         assert "ENG-9" in text  # the specific destination target is named, not generic
+
+
+def test_req4_malformed_destination_is_skipped_in_prompt_and_logged_as_a_warning():
+    """New try/except path this PR introduces (wrapper.py's prompt-building and post-run
+    verification loops): a malformed destination string must not crash the run, must not
+    appear as a silent no-op instruction in the prompt, and must surface as an explicit
+    warning in the run log so it's never mistaken for a passed check."""
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        home.mkdir(parents=True, exist_ok=True)
+        persona_path = _write_persona_fixture(home)
+        config = DESTINATION_CONFIG_YAML.format(
+            persona_skill=persona_path, dest_rel="unused"
+        ).replace('"file:{dest_rel}"'.format(dest_rel="unused"), '"not-a-valid-destination"')
+        (home / "config.yaml").write_text(config)
+        fake = ChatCapableFakeHermes(chat_stdout="done\nsession_id: x\n")
+
+        rc = run_instance(home, runner=fake)
+        assert rc == EXIT_OK  # a malformed destination doesn't fail the run itself
+
+        chat_calls = [c for c in fake.calls if "chat" in c]
+        q_idx = chat_calls[0].index("-q")
+        prompt = chat_calls[0][q_idx + 1]
+        assert "not-a-valid-destination" not in prompt  # no destination instruction leaked in
+
+        log_path = next((home / "logs").glob("*.md"))
+        text = log_path.read_text()
+        assert "invalid destination" in text.lower()
+        assert "not-a-valid-destination" in text

@@ -74,3 +74,15 @@ def test_task_destinations_ungated_is_or_across_the_run():
 def test_task_destinations_ungated_ignores_tasks_with_no_destination():
     tasks = [Task(task_id="a", destination=None, auto_execute=True)]
     assert task_destinations_ungated(tasks) == {}
+
+
+def test_task_destinations_ungated_silently_skips_a_malformed_destination():
+    """New try/except path this PR introduces: a malformed destination string must not
+    crash gate computation before the run even starts, nor silently grant anything for
+    it — it's surfaced instead by wrapper.py's post-run REQ-4 verification pass."""
+    tasks = [
+        Task(task_id="a", destination="not-a-valid-destination", auto_execute=True),
+        Task(task_id="b", destination="linear:ENG-1", auto_execute=False),
+    ]
+    result = task_destinations_ungated(tasks)
+    assert result == {"linear": False}  # malformed entry contributes nothing

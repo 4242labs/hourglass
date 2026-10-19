@@ -60,11 +60,12 @@ def test_set_task_source_persists_and_does_not_affect_current_run_tasks():
 
 def test_task_destinations_ungated_is_or_across_the_run():
     """REQ-7 edge case: mixing auto_execute true/false for the same destination in one
-    run ungates for the whole run (OR, not per-task)."""
+    run ungates for the whole run (OR, not per-task). Destinations use REQ-4's fixed
+    `<kind>:<target>` schema and resolve to their required toolset/MCP-server name."""
     tasks = [
-        Task(task_id="a", destination="linear", auto_execute=False),
-        Task(task_id="b", destination="linear", auto_execute=True),
-        Task(task_id="c", destination="gmail", auto_execute=False),
+        Task(task_id="a", destination="linear:ENG-1", auto_execute=False),
+        Task(task_id="b", destination="linear:ENG-2", auto_execute=True),
+        Task(task_id="c", destination="email:ops@example.com", auto_execute=False),
     ]
     result = task_destinations_ungated(tasks)
     assert result == {"linear": True, "gmail": False}
@@ -73,3 +74,15 @@ def test_task_destinations_ungated_is_or_across_the_run():
 def test_task_destinations_ungated_ignores_tasks_with_no_destination():
     tasks = [Task(task_id="a", destination=None, auto_execute=True)]
     assert task_destinations_ungated(tasks) == {}
+
+
+def test_task_destinations_ungated_silently_skips_a_malformed_destination():
+    """New try/except path this PR introduces: a malformed destination string must not
+    crash gate computation before the run even starts, nor silently grant anything for
+    it — it's surfaced instead by wrapper.py's post-run REQ-4 verification pass."""
+    tasks = [
+        Task(task_id="a", destination="not-a-valid-destination", auto_execute=True),
+        Task(task_id="b", destination="linear:ENG-1", auto_execute=False),
+    ]
+    result = task_destinations_ungated(tasks)
+    assert result == {"linear": False}  # malformed entry contributes nothing

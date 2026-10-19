@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 from . import config as config_mod
+from . import destinations as dest_mod
 from . import persona as persona_mod
 from . import tasksource
 from .cli_utils import CommandResult, hermes_args, run as default_run
@@ -113,6 +114,29 @@ def _run_once(instance_home: Path, runner) -> int:
         log.write(instance_home)
         return EXIT_SESSION_FAILED
 
+    # REQ-4: each task's declared destination gets its own verification pass. `file`
+    # destinations are mechanically checkable (path exists); `linear`/`email` are
+    # `manual_by:` per the spec itself (no read-back API owned by this repo) — logged as
+    # a warning naming that limit explicitly, never silently treated as verified.
+    for task in cfg.tasks:
+        if not task.destination:
+            continue
+        try:
+            dest = dest_mod.parse(task.destination)
+        except dest_mod.InvalidDestinationError as exc:
+            log.record_warning(f"task {task.task_id}: invalid destination: {exc}")
+            continue
+        if dest_mod.requires_manual_verification(dest):
+            log.record_warning(
+                f"task {task.task_id}: destination '{task.destination}' requires manual "
+                f"verification (no read-back API owned by this repo, per REQ-4 manual_by:)"
+            )
+            continue
+        error = dest_mod.verify(dest, instance_home)
+        if error:
+            log.record_warning(f"task {task.task_id}: {error}")
+    log.write(instance_home)
+
     # REQ-6: state file is written back after a clean run, keyed on run_id so the hash
     # changes every run (cross-run dedup content itself is task-list-schema territory,
     # out of scope per §4 — this is the write-back mechanism REQ-6 requires to exist).
@@ -136,4 +160,13 @@ def _build_prompt(cfg, state_snippet: str) -> str:
     lines = [f"Task source: {cfg.task_source}"]
     if state_snippet:
         lines += ["", "Prior run state:", state_snippet]
+    for task in cfg.tasks:
+        if not task.destination:
+            continue
+        try:
+            dest = dest_mod.parse(task.destination)
+        except dest_mod.InvalidDestinationError:
+            continue  # surfaced instead by the post-run REQ-4 verification pass
+        lines += ["", f"Task {task.task_id} destination instruction:",
+                   dest_mod.instruction_for(dest, cfg.instance_home)]
     return "\n".join(lines)

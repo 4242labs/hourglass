@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 from . import config as config_mod
+from . import persona as persona_mod
 from . import tasksource
 from .cli_utils import CommandResult, hermes_args, run as default_run
 from .locking import RunAlreadyActiveError, instance_lock
@@ -80,11 +81,22 @@ def _run_once(instance_home: Path, runner) -> int:
 
     prompt = _build_prompt(cfg, state_snippet)
 
-    # REQ-1: a fresh one-shot session, never resumed.
-    result: CommandResult = runner(
-        hermes_args(cfg.profile, "chat", "-q", prompt, "-Q"),
-        timeout=None,
-    )
+    # cfg.persona_skill is a filesystem path to the crew persona's spec (e.g.
+    # tortuga/crew/pessoa/pessoa.md), materialized as a one-shot Hermes skill for the
+    # duration of this one invocation only — mirrors the operator's own `--append`
+    # mechanism (see hourglass/persona.py) rather than relying on a prompt label Hermes
+    # never actually enforces.
+    try:
+        with persona_mod.persona_skill(cfg.profile, Path(cfg.persona_skill)) as skill_name:
+            # REQ-1: a fresh one-shot session, never resumed.
+            result: CommandResult = runner(
+                hermes_args(cfg.profile, "chat", "-q", prompt, "-Q", skills=skill_name),
+                timeout=None,
+            )
+    except persona_mod.PersonaLoadError as exc:
+        log.record_warning(f"persona load failed: {exc}")
+        log.write(instance_home)
+        return EXIT_GATE_FAILED
 
     # REQ-2: one grep-able line per task. The task-list-schema phase (out of scope, §4)
     # owns per-task status parsing from the session's own output; until that schema
@@ -121,7 +133,7 @@ def _run_once(instance_home: Path, runner) -> int:
 
 
 def _build_prompt(cfg, state_snippet: str) -> str:
-    lines = [f"Persona: {cfg.persona_skill}", f"Task source: {cfg.task_source}"]
+    lines = [f"Task source: {cfg.task_source}"]
     if state_snippet:
         lines += ["", "Prior run state:", state_snippet]
     return "\n".join(lines)

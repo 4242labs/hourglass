@@ -39,10 +39,16 @@ def run(args: Sequence[str], timeout: Optional[float] = 60.0) -> CommandResult:
     )
 
 
-def hermes_args(profile: Optional[str], *rest: str) -> List[str]:
-    """Build a `hermes [--profile X] <rest...>` argv list."""
+def hermes_args(
+    profile: Optional[str], *rest: str, skills: Optional[str] = None
+) -> List[str]:
+    """Build a `hermes [--profile X] [--skills Y] <rest...>` argv list. `skills` loads a
+    persona materialized by `hourglass.persona.persona_skill` for the duration of one
+    invocation; omit it for the toolset-gate commands, which carry no persona."""
     args = ["hermes"]
     if profile:
         args += ["--profile", profile]
+    if skills:
+        args += ["--skills", skills]
     args += list(rest)
     return args

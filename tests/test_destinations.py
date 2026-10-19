@@ -42,7 +42,12 @@ def test_parse_rejects_empty_target():
 
 @pytest.mark.parametrize(
     "destination,expected_toolset",
-    [("file:a.txt", "file"), ("linear:ENG-1", "linear"), ("email:a@b.com", "gmail")],
+    [
+        ("file:a.txt", "file"),
+        ("linear:ENG-1", "linear"),
+        ("linear-issue:42L", "linear"),
+        ("email:a@b.com", "gmail"),
+    ],
 )
 def test_required_toolset_maps_each_kind(destination, expected_toolset):
     d = dest_mod.parse(destination)
@@ -94,3 +99,24 @@ def test_verify_linear_and_email_are_not_mechanically_checked(destination, tmp_p
 def test_file_destination_does_not_require_manual_verification():
     d = dest_mod.parse("file:a.txt")
     assert dest_mod.requires_manual_verification(d) is False
+
+
+def test_parse_linear_issue_destination():
+    d = dest_mod.parse("linear-issue:42L")
+    assert d.kind == "linear-issue"
+    assert d.target == "42L"
+
+
+def test_instruction_for_linear_issue_creates_new_issues_never_comments(tmp_path):
+    d = dest_mod.parse("linear-issue:42L")
+    instruction = dest_mod.instruction_for(d, tmp_path)
+    assert "42L" in instruction
+    assert "save_issue" in instruction
+    assert "one NEW issue per output item" in instruction
+    assert "never comment" in instruction.lower()
+
+
+def test_linear_issue_destination_is_manual_verification(tmp_path):
+    d = dest_mod.parse("linear-issue:42L")
+    assert dest_mod.requires_manual_verification(d) is True
+    assert dest_mod.verify(d, tmp_path) is None

@@ -6,6 +6,7 @@ not-yet-designed piece. This module is that schema, now fixed concretely:
 
   destination: "file:<absolute-or-instance-relative-path>"
   destination: "linear:<issue-id-or-identifier>"
+  destination: "linear-issue:<team-key-or-name>"
   destination: "email:<address>"
 
 A task's `destination` field is one of the three forms above. The wrapper does
@@ -29,13 +30,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-VALID_KINDS = ("file", "linear", "email")
+VALID_KINDS = ("file", "linear", "linear-issue", "email")
 
 
 @dataclass(frozen=True)
 class Destination:
-    kind: str  # "file" | "linear" | "email"
-    target: str  # path string | Linear issue id | email address
+    kind: str  # "file" | "linear" | "linear-issue" | "email"
+    target: str  # path string | Linear issue id | Linear team | email address
 
 
 class InvalidDestinationError(ValueError):
@@ -62,7 +63,7 @@ def required_toolset(dest: Destination) -> str:
     for the run (REQ-7's per-destination auto-execute ungate operates on this
     name). Declaring the allowlist remains the operator's explicit choice
     (OB-9) — this is only the name to grant, never an auto-inferred grant."""
-    return {"file": "file", "linear": "linear", "email": "gmail"}[dest.kind]
+    return {"file": "file", "linear": "linear", "linear-issue": "linear", "email": "gmail"}[dest.kind]
 
 
 def instruction_for(dest: Destination, instance_home: Path) -> str:
@@ -82,6 +83,14 @@ def instruction_for(dest: Destination, instance_home: Path) -> str:
             f"MCP tool to add a comment with the task's output to issue '{dest.target}' "
             f"(save_comment or the equivalent comment-creation tool for that issue). "
             f"Do not create a new issue; the target issue already exists."
+        )
+    if dest.kind == "linear-issue":
+        return (
+            f"This task's output destination is new Linear issues in team '{dest.target}'. "
+            f"Use the `linear` MCP tool `save_issue` to create one NEW issue per output item "
+            f"in that team, taking project, status, labels and title format from the task "
+            f"source. Never pass an existing issue id, never comment on or edit an existing "
+            f"issue. Producing zero items is valid: then create nothing."
         )
     if dest.kind == "email":
         return (
@@ -105,9 +114,9 @@ def verify(dest: Destination, instance_home: Path) -> Optional[str]:
         if not path.exists():
             return f"file destination not found after run: {path}"
         return None
-    # linear / email: `manual_by:` per REQ-4 — no read-back API in this repo's scope.
+    # linear / linear-issue / email: `manual_by:` per REQ-4 — no read-back API in this repo's scope.
     return None
 
 
 def requires_manual_verification(dest: Destination) -> bool:
-    return dest.kind in ("linear", "email")
+    return dest.kind in ("linear", "linear-issue", "email")

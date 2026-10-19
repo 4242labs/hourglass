@@ -32,6 +32,20 @@ server, so OAuth credentials are never purged just to turn a destination off for
    task — and, on a clean exit only, parse a `NEXT_TASK_SOURCE:`-prefixed line from the session's
    output and apply it for the *next* run.
 
+## Destinations
+
+Each task in `config.yaml` may declare where its output goes, as `<kind>:<target>`:
+
+| Destination | What the session is told to do | Needs on the allowlist | Verified by |
+|:--|:--|:--|:--|
+| `file:<path>` | write the output to that path (relative = instance home) | `file` | wrapper, `path.exists()` |
+| `linear:<issue>` | add a comment to that existing issue | `linear` MCP comment tool | manual, flagged in the run log |
+| `linear-issue:<team>` | create one **new** issue per output item in that team; project, status and title come from the task source; zero items creates nothing | `linear` MCP `save_issue` | manual, flagged in the run log |
+| `email:<address>` | send the output to that address | `gmail` MCP send tool | manual, flagged in the run log |
+
+The destination only tells the session what to do. Granting the tool is still the
+instance's own allowlist, and the auto-execute gate above still applies to it.
+
 ## Layout
 
 ```

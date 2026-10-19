@@ -302,6 +302,32 @@ def test_req4_linear_destination_is_flagged_manual_never_silently_passed():
         assert "ENG-9" in text  # the specific destination target is named, not generic
 
 
+def test_req4_linear_issue_destination_reaches_prompt_and_is_flagged_manual():
+    """`linear-issue:<team>` (one new issue per output item): the session must be told to
+    create new issues in that team, and the run log must flag it manual, never passed."""
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        home.mkdir(parents=True, exist_ok=True)
+        persona_path = _write_persona_fixture(home)
+        config = DESTINATION_CONFIG_YAML.format(
+            persona_skill=persona_path, dest_rel="unused"
+        ).replace('"file:unused"', '"linear-issue:42L"')
+        (home / "config.yaml").write_text(config)
+        fake = ChatCapableFakeHermes(chat_stdout="done\nsession_id: x\n")
+
+        rc = run_instance(home, runner=fake)
+        assert rc == EXIT_OK
+
+        chat_calls = [c for c in fake.calls if "chat" in c]
+        prompt = chat_calls[0][chat_calls[0].index("-q") + 1]
+        assert "save_issue" in prompt
+        assert "team '42L'" in prompt
+
+        text = next((home / "logs").glob("*.md")).read_text()
+        assert "manual verification" in text.lower()
+        assert "linear-issue:42L" in text
+
+
 def test_req4_malformed_destination_is_skipped_in_prompt_and_logged_as_a_warning():
     """New try/except path this PR introduces (wrapper.py's prompt-building and post-run
     verification loops): a malformed destination string must not crash the run, must not

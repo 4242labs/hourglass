@@ -11,9 +11,17 @@ from tests.fixtures import GMAIL_TOOLS, LINEAR_TOOLS, mcp_list_output, mcp_test_
 from tests.test_toolset import FakeHermes, _ALL_26
 
 
+def _write_persona_fixture(home: Path) -> Path:
+    """A standalone persona file, not under HERMES_HOME — mirrors a real crew persona
+    (e.g. tortuga/crew/pessoa/pessoa.md) that lives entirely outside Hermes's own tree."""
+    persona_path = home / "fixture-persona.md"
+    persona_path.write_text("# Agent: FIXTURE\n\nA minimal persona for wrapper e2e tests.\n")
+    return persona_path
+
+
 CONFIG_YAML = """
 profile: hg-e2e
-persona_skill: macgyver
+persona_skill: {persona_skill}
 task_source: 42L-2212
 allowlist:
   builtin: [builtin_00]
@@ -35,7 +43,7 @@ class ChatCapableFakeHermes(FakeHermes):
 
     def __call__(self, args, timeout=None):
         cmd = list(args[1:])
-        if len(cmd) >= 2 and cmd[0] == "--profile":
+        while len(cmd) >= 2 and cmd[0] in ("--profile", "--skills"):
             cmd = cmd[2:]
         if cmd[:1] == ["chat"]:
             self.calls.append(list(args))
@@ -45,12 +53,13 @@ class ChatCapableFakeHermes(FakeHermes):
 
 def _write_config(home: Path, extra: str = "") -> None:
     home.mkdir(parents=True, exist_ok=True)
-    (home / "config.yaml").write_text(CONFIG_YAML.format() + extra)
+    persona_path = _write_persona_fixture(home)
+    (home / "config.yaml").write_text(CONFIG_YAML.format(persona_skill=persona_path) + extra)
 
 
 TASKS_CONFIG_YAML = """
 profile: hg-e2e
-persona_skill: macgyver
+persona_skill: {persona_skill}
 task_source: 42L-2212
 allowlist:
   builtin: [builtin_00]
@@ -76,7 +85,10 @@ tasks:
 
 def _write_tasks_config(home: Path, state_file) -> None:
     home.mkdir(parents=True, exist_ok=True)
-    (home / "config.yaml").write_text(TASKS_CONFIG_YAML.format(state_file=state_file))
+    persona_path = _write_persona_fixture(home)
+    (home / "config.yaml").write_text(
+        TASKS_CONFIG_YAML.format(persona_skill=persona_path, state_file=state_file)
+    )
 
 
 def test_req2_run_log_has_one_grepable_line_per_resolved_task():
@@ -122,6 +134,25 @@ def test_req6_state_file_is_written_back_and_hash_changes_each_run():
         hash2 = hashlib.md5(state_path.read_bytes()).hexdigest()
 
         assert hash1 != hash2  # changed both times, per REQ-6 acceptance
+
+
+def test_chat_invocation_carries_skills_flag_for_persona():
+    """Hourglass must actually load the persona via --skills, not just label it in the
+    prompt — the bug this fix addresses."""
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_config(home)
+        fake = ChatCapableFakeHermes(chat_stdout="done\nsession_id: x\n")
+
+        rc = run_instance(home, runner=fake)
+
+        assert rc == EXIT_OK
+        chat_calls = [c for c in fake.calls if "chat" in c]
+        assert len(chat_calls) == 1
+        assert "--skills" in chat_calls[0]
+        skills_idx = chat_calls[0].index("--skills")
+        skill_name = chat_calls[0][skills_idx + 1]
+        assert skill_name.startswith("aa-persona-")
 
 
 def test_clean_run_returns_ok_and_writes_log():

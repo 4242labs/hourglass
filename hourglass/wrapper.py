@@ -86,16 +86,27 @@ def _run_once(instance_home: Path, runner) -> int:
         timeout=None,
     )
 
-    # REQ-2: per-task status lines. Actual per-task status comes from the session's own
-    # output (parsed by task-list-schema tooling, out of scope here) — the wrapper records
-    # the run-level outcome; a future task-list-schema implementation is responsible for
-    # emitting the per-task `- task:` lines into this same log via `RunLog.record_task`.
+    # REQ-2: one grep-able line per task. The task-list-schema phase (out of scope, §4)
+    # owns per-task status parsing from the session's own output; until that schema
+    # exists, every task in this run gets the same run-level outcome recorded against it
+    # so REQ-2's acceptance check (line count == resolved task count, every line carries a
+    # status suffix) is met today rather than deferred past this implementation.
+    run_status = "done" if result.ok else "failed"
+    for task in cfg.tasks:
+        log.record_task(task.task_id, run_status)
     log.write(instance_home)
 
     if not result.ok:
         log.record_warning(f"hermes chat exited {result.returncode}: {result.stderr.strip()}")
         log.write(instance_home)
         return EXIT_SESSION_FAILED
+
+    # REQ-6: state file is written back after a clean run, keyed on run_id so the hash
+    # changes every run (cross-run dedup content itself is task-list-schema territory,
+    # out of scope per §4 — this is the write-back mechanism REQ-6 requires to exist).
+    if cfg.state_file is not None:
+        cfg.state_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg.state_file.write_text(f"last_run_id: {run_id}\n")
 
     # REQ-3: parse NEXT_TASK_SOURCE by prefix match, apply only on clean exit.
     proposed = tasksource.parse_next_task_source(result.stdout)

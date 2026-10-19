@@ -48,6 +48,82 @@ def _write_config(home: Path, extra: str = "") -> None:
     (home / "config.yaml").write_text(CONFIG_YAML.format() + extra)
 
 
+TASKS_CONFIG_YAML = """
+profile: hg-e2e
+persona_skill: macgyver
+task_source: 42L-2212
+allowlist:
+  builtin: [builtin_00]
+  plugin: []
+  mcp: {{}}
+gated_live_tools: {{}}
+state_file: {state_file}
+tasks:
+  - task_id: t1
+    destination: null
+    auto_execute: false
+    prompt: do thing one
+  - task_id: t2
+    destination: null
+    auto_execute: false
+    prompt: do thing two
+  - task_id: t3
+    destination: null
+    auto_execute: false
+    prompt: do thing three
+"""
+
+
+def _write_tasks_config(home: Path, state_file) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.yaml").write_text(TASKS_CONFIG_YAML.format(state_file=state_file))
+
+
+def test_req2_run_log_has_one_grepable_line_per_resolved_task():
+    """REQ-2 acceptance: grep -c '^- task:' must equal the resolved task list's own task
+    count, and every line must carry a status: (done|failed|skipped) suffix."""
+    import re
+
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_tasks_config(home, state_file="null")
+        fake = ChatCapableFakeHermes(chat_stdout="done\nsession_id: x\n")
+
+        rc = run_instance(home, runner=fake)
+        assert rc == EXIT_OK
+
+        log_path = next((home / "logs").glob("*.md"))
+        text = log_path.read_text()
+        task_lines = [l for l in text.splitlines() if l.startswith("- task:")]
+        assert len(task_lines) == 3  # matches the resolved task list's count exactly
+        for line in task_lines:
+            assert re.search(r"status: \(done|failed|skipped\)$", line)
+
+
+def test_req6_state_file_is_written_back_and_hash_changes_each_run():
+    """REQ-6 acceptance: an instance with state_file set must have its hash change after
+    each of two runs."""
+    import hashlib
+
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        state_path = home / "state" / "dedup.state"
+        _write_tasks_config(home, state_file=f'"{state_path}"')
+        fake1 = ChatCapableFakeHermes(chat_stdout="done\nsession_id: x\n")
+
+        rc1 = run_instance(home, runner=fake1)
+        assert rc1 == EXIT_OK
+        assert state_path.exists()
+        hash1 = hashlib.md5(state_path.read_bytes()).hexdigest()
+
+        fake2 = ChatCapableFakeHermes(chat_stdout="done\nsession_id: x\n")
+        rc2 = run_instance(home, runner=fake2)
+        assert rc2 == EXIT_OK
+        hash2 = hashlib.md5(state_path.read_bytes()).hexdigest()
+
+        assert hash1 != hash2  # changed both times, per REQ-6 acceptance
+
+
 def test_clean_run_returns_ok_and_writes_log():
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)

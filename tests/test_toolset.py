@@ -210,8 +210,8 @@ def test_exclusivity_guard_composed_with_mixed_auto_execute_tasks_end_to_end():
     # destination has auto_execute: true -> OR resolves to True for the whole run,
     # so cronjob is allowed alongside it (REQ-7 edge case: run-scoped, not task-scoped).
     mixed_tasks = [
-        Task(task_id="a", destination="linear", auto_execute=False),
-        Task(task_id="b", destination="linear", auto_execute=True),
+        Task(task_id="a", destination="linear:ENG-1", auto_execute=False),
+        Task(task_id="b", destination="linear:ENG-2", auto_execute=True),
     ]
     destinations = task_destinations_ungated(mixed_tasks)
     assert destinations == {"linear": True}
@@ -219,8 +219,8 @@ def test_exclusivity_guard_composed_with_mixed_auto_execute_tasks_end_to_end():
 
     # Flip both to auto_execute: false -> OR resolves to False -> cronjob rejected.
     all_false_tasks = [
-        Task(task_id="a", destination="linear", auto_execute=False),
-        Task(task_id="b", destination="linear", auto_execute=False),
+        Task(task_id="a", destination="linear:ENG-1", auto_execute=False),
+        Task(task_id="b", destination="linear:ENG-2", auto_execute=False),
     ]
     destinations_false = task_destinations_ungated(all_false_tasks)
     assert destinations_false == {"linear": False}

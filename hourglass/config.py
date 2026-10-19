@@ -125,12 +125,27 @@ def _to_raw(cfg: InstanceConfig) -> Dict[str, Any]:
 
 
 def task_destinations_ungated(tasks: List[Task]) -> Dict[str, bool]:
-    """REQ-7 step 4: run-scoped ungate. For each destination touched by any task this run,
-    True iff *any* task touching it has auto_execute: true (OR across the whole run, not
-    per task — spec's explicit edge case)."""
+    """REQ-7 step 4: run-scoped ungate. For each destination's required toolset touched by
+    any task this run, True iff *any* task touching it has auto_execute: true (OR across
+    the whole run, not per task — spec's explicit edge case).
+
+    `task.destination` is REQ-4's fixed schema (`<kind>:<target>`, see destinations.py);
+    this resolves each one to the toolset/MCP-server name the gate actually keys on
+    (destinations.required_toolset), never the raw destination string itself.
+    """
+    from . import destinations as dest_mod  # local import: avoids a cycle at module load
+
     result: Dict[str, bool] = {}
     for task in tasks:
         if not task.destination:
             continue
-        result[task.destination] = result.get(task.destination, False) or task.auto_execute
+        try:
+            dest = dest_mod.parse(task.destination)
+            toolset_name = dest_mod.required_toolset(dest)
+        except dest_mod.InvalidDestinationError:
+            # An invalid destination string is surfaced by wrapper.py's own REQ-4
+            # verification pass after the run; it must not crash gate computation
+            # before the run even starts, nor silently grant anything for it here.
+            continue
+        result[toolset_name] = result.get(toolset_name, False) or task.auto_execute
     return result

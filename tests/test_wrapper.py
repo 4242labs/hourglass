@@ -217,3 +217,86 @@ def test_second_concurrent_run_is_skipped_not_double_invoked():
             results.append(rc)
         assert results == [75]  # EXIT_LOCKED
         assert not any(c[1:2] == ["chat"] for c in fake.calls)
+
+
+DESTINATION_CONFIG_YAML = """
+profile: hg-e2e
+persona_skill: {persona_skill}
+task_source: 42L-2212
+allowlist:
+  builtin: [builtin_00]
+  plugin: []
+  mcp: {{}}
+gated_live_tools: {{}}
+state_file: null
+tasks:
+  - task_id: t1
+    destination: "file:{dest_rel}"
+    auto_execute: false
+    prompt: write a file
+"""
+
+
+def _write_destination_config(home: Path, dest_rel: str) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    persona_path = _write_persona_fixture(home)
+    (home / "config.yaml").write_text(
+        DESTINATION_CONFIG_YAML.format(persona_skill=persona_path, dest_rel=dest_rel)
+    )
+
+
+def test_req4_destination_instruction_reaches_the_chat_prompt():
+    """REQ-4: the wrapper must tell the session the exact file path to write to, not
+    just label the destination in config."""
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_destination_config(home, dest_rel="out/result.txt")
+        fake = ChatCapableFakeHermes(chat_stdout="done\nsession_id: x\n")
+
+        rc = run_instance(home, runner=fake)
+        assert rc == EXIT_OK
+
+        chat_calls = [c for c in fake.calls if "chat" in c]
+        assert len(chat_calls) == 1
+        q_idx = chat_calls[0].index("-q")
+        prompt = chat_calls[0][q_idx + 1]
+        assert str(home / "out" / "result.txt") in prompt
+        assert "destination" in prompt.lower()
+
+
+def test_req4_missing_file_destination_is_logged_as_a_warning_not_a_run_failure():
+    """REQ-4 verification: a file destination the session never actually wrote to is a
+    recorded warning in the run log, not a silently-passed check and not a hard failure
+    (the session itself already reported its own per-task status via REQ-2)."""
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_destination_config(home, dest_rel="out/never-written.txt")
+        fake = ChatCapableFakeHermes(chat_stdout="done\nsession_id: x\n")
+
+        rc = run_instance(home, runner=fake)
+        assert rc == EXIT_OK  # a missing destination artifact doesn't fail the run itself
+
+        log_path = next((home / "logs").glob("*.md"))
+        text = log_path.read_text()
+        assert "never-written.txt" in text
+        assert "warning" in text.lower()
+
+
+def test_req4_linear_destination_is_flagged_manual_never_silently_passed():
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        home.mkdir(parents=True, exist_ok=True)
+        persona_path = _write_persona_fixture(home)
+        config = DESTINATION_CONFIG_YAML.format(
+            persona_skill=persona_path, dest_rel="unused"
+        ).replace('"file:{dest_rel}"'.format(dest_rel="unused"), '"linear:ENG-9"')
+        (home / "config.yaml").write_text(config)
+        fake = ChatCapableFakeHermes(chat_stdout="done\nsession_id: x\n")
+
+        rc = run_instance(home, runner=fake)
+        assert rc == EXIT_OK
+
+        log_path = next((home / "logs").glob("*.md"))
+        text = log_path.read_text()
+        assert "manual verification" in text.lower()
+        assert "ENG-9" in text  # the specific destination target is named, not generic

@@ -60,11 +60,12 @@ def test_set_task_source_persists_and_does_not_affect_current_run_tasks():
 
 def test_task_destinations_ungated_is_or_across_the_run():
     """REQ-7 edge case: mixing auto_execute true/false for the same destination in one
-    run ungates for the whole run (OR, not per-task)."""
+    run ungates for the whole run (OR, not per-task). Destinations use REQ-4's fixed
+    `<kind>:<target>` schema and resolve to their required toolset/MCP-server name."""
     tasks = [
-        Task(task_id="a", destination="linear", auto_execute=False),
-        Task(task_id="b", destination="linear", auto_execute=True),
-        Task(task_id="c", destination="gmail", auto_execute=False),
+        Task(task_id="a", destination="linear:ENG-1", auto_execute=False),
+        Task(task_id="b", destination="linear:ENG-2", auto_execute=True),
+        Task(task_id="c", destination="email:ops@example.com", auto_execute=False),
     ]
     result = task_destinations_ungated(tasks)
     assert result == {"linear": True, "gmail": False}

@@ -79,7 +79,16 @@ def _run_once(instance_home: Path, task_id: Optional[str], runner, popen) -> int
     log = RunLog(run_id)
     log.set_header()
 
-    cfg = config_mod.load(instance_home)
+    # REQ-7: a config-load-time limits failure (missing/invalid instance-level block)
+    # must also exit EXIT_GATE_FAILED, before any toolset or agent change — not an
+    # uncaught exception.
+    try:
+        cfg = config_mod.load(instance_home)
+    except config_mod.LimitsValidationError as exc:
+        log.record_warning(f"limits validation failed: {exc}")
+        log.write(instance_home)
+        print(f"hourglass: {task_id or '<none>'} failed: {exc}")
+        return EXIT_GATE_FAILED
 
     # REQ-1: task selection happens before any toolset or agent change.
     selected_task, select_error = _select_task(cfg, task_id)

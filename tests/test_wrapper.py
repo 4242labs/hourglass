@@ -351,6 +351,146 @@ def test_req4_linear_issue_destination_reaches_prompt_and_is_flagged_manual():
         assert "linear-issue:42L" in text
 
 
+MULTI_TASK_CONFIG_YAML = (
+    """
+profile: hg-e2e
+persona_skill: {persona_skill}
+task_source: 42L-2212
+"""
+    + LIMITS_YAML
+    + """
+allowlist:
+  builtin: [builtin_00]
+  plugin: []
+  mcp: {{}}
+gated_live_tools: {{}}
+state_file: null
+tasks:
+  - task_id: a
+    destination: file:out/a.txt
+    auto_execute: false
+    prompt: ONLY-TASK-A-PROMPT-TEXT
+  - task_id: b
+    destination: file:out/b.txt
+    auto_execute: false
+    prompt: ONLY-TASK-B-PROMPT-TEXT
+"""
+)
+
+
+def _write_multi_task_config(home: Path) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    persona_path = _write_persona_fixture(home)
+    (home / "config.yaml").write_text(MULTI_TASK_CONFIG_YAML.format(persona_skill=persona_path))
+
+
+def test_task_selection():
+    """REQ-1: exactly the named task runs, in a fresh session; its own prompt leads
+    the built prompt; only its own destination enters the gate computation. An
+    unknown id, and a missing id with two declared tasks, both fail before any
+    toolset or agent change (the runner/popen spies record zero calls)."""
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_multi_task_config(home)
+        fake_popen = _fake_popen_result()
+
+        rc = run_instance(home, task_id="a", runner=FakeHermes(), popen=fake_popen)
+        assert rc == EXIT_OK
+        args = fake_popen.last_args
+        q_idx = args.index("-q")
+        prompt = args[q_idx + 1]
+        assert "ONLY-TASK-A-PROMPT-TEXT" in prompt
+        assert "ONLY-TASK-B-PROMPT-TEXT" not in prompt
+
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_multi_task_config(home)
+
+        class SpyRunner(FakeHermes):
+            calls = 0
+
+            def __call__(self, args, timeout=None):
+                SpyRunner.calls += 1
+                return super().__call__(args, timeout=timeout)
+
+        def spy_popen(args, **kwargs):
+            spy_popen.calls = getattr(spy_popen, "calls", 0) + 1
+            return _fake_popen_result()(args, **kwargs)
+
+        rc = run_instance(home, task_id="unknown-id", runner=SpyRunner(), popen=spy_popen)
+        assert rc == EXIT_GATE_FAILED
+        assert SpyRunner.calls == 0
+        assert not hasattr(spy_popen, "calls") or spy_popen.calls == 0
+
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_multi_task_config(home)
+
+        class SpyRunner2(FakeHermes):
+            calls = 0
+
+            def __call__(self, args, timeout=None):
+                SpyRunner2.calls += 1
+                return super().__call__(args, timeout=timeout)
+
+        def spy_popen2(args, **kwargs):
+            spy_popen2.calls = getattr(spy_popen2, "calls", 0) + 1
+            return _fake_popen_result()(args, **kwargs)
+
+        rc = run_instance(home, task_id=None, runner=SpyRunner2(), popen=spy_popen2)
+        assert rc == EXIT_GATE_FAILED
+        assert SpyRunner2.calls == 0
+        assert not hasattr(spy_popen2, "calls") or spy_popen2.calls == 0
+
+
+def test_bad_limits_refused():
+    """REQ-7: a config missing run_timeout_seconds is refused via run_instance itself,
+    names the field in the run record, and never reaches the toolset gate or the agent
+    runner (spy records zero calls)."""
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        home.mkdir(parents=True, exist_ok=True)
+        persona_path = _write_persona_fixture(home)
+        bad_config = (
+            """
+profile: hg-e2e
+persona_skill: {persona_skill}
+task_source: 42L-2212
+limits:
+  max_turns: 50
+  stall_seconds: 420
+allowlist:
+  builtin: [builtin_00]
+  plugin: []
+  mcp: {{}}
+gated_live_tools: {{}}
+state_file: null
+tasks: []
+"""
+        ).format(persona_skill=persona_path)
+        (home / "config.yaml").write_text(bad_config)
+
+        class SpyRunner(FakeHermes):
+            calls = 0
+
+            def __call__(self, args, timeout=None):
+                SpyRunner.calls += 1
+                return super().__call__(args, timeout=timeout)
+
+        def spy_popen(args, **kwargs):
+            spy_popen.calls = getattr(spy_popen, "calls", 0) + 1
+            return _fake_popen_result()(args, **kwargs)
+
+        rc = run_instance(home, runner=SpyRunner(), popen=spy_popen)
+        assert rc == EXIT_GATE_FAILED
+        assert SpyRunner.calls == 0
+        assert not hasattr(spy_popen, "calls") or spy_popen.calls == 0
+
+        log_path = next((home / "logs").glob("*.md"))
+        text = log_path.read_text()
+        assert "run_timeout_seconds" in text
+
+
 def test_req4_malformed_destination_is_skipped_in_prompt_and_logged_as_a_warning():
     """New try/except path this PR introduces (wrapper.py's prompt-building and post-run
     verification loops): a malformed destination string must not crash the run, must not

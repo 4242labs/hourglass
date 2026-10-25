@@ -1,5 +1,6 @@
-"""End-to-end orchestration test: wires REQ-1..REQ-7 together against a fake `hermes`
-runner and a real config.yaml/instance_home on disk."""
+"""End-to-end orchestration test: wires REQ-1..REQ-8 together against a fake `popen`
+(matching cli_utils.run_agent_streaming's contract) and a real config.yaml/instance_home
+on disk."""
 from __future__ import annotations
 
 import tempfile
@@ -7,8 +8,8 @@ from pathlib import Path
 
 from hourglass.cli_utils import CommandResult
 from hourglass.wrapper import EXIT_GATE_FAILED, EXIT_OK, EXIT_SESSION_FAILED, run_instance
-from tests.fixtures import GMAIL_TOOLS, LINEAR_TOOLS, mcp_list_output, mcp_test_output, tools_list_output
-from tests.test_toolset import FakeHermes, _ALL_26
+from tests.fixtures import FakePopen
+from tests.test_toolset import FakeHermes
 
 
 def _write_persona_fixture(home: Path) -> Path:
@@ -19,10 +20,45 @@ def _write_persona_fixture(home: Path) -> Path:
     return persona_path
 
 
-CONFIG_YAML = """
+LIMITS_YAML = """limits:
+  run_timeout_seconds: 1200
+  max_turns: 50
+  stall_seconds: 420
+  grace_seconds: 30
+"""
+
+
+def _fake_popen_result(text="done", session_id="x", returncode=0):
+    """Build a `popen` callable returning one init event + one result event."""
+    events = [
+        '{"type": "system", "subtype": "init", "model": "fake-model", "session_id": "%s"}' % session_id,
+        '{"type": "result", "session_id": "%s", "text": %s}' % (session_id, _json_str(text)),
+    ]
+
+    def fake_popen(args, **kwargs):
+        fake_popen.last_args = list(args)
+        fake_popen.last_env = kwargs.get("env")
+        return FakePopen(events, returncode=returncode)
+
+    fake_popen.last_args = None
+    fake_popen.last_env = None
+    return fake_popen
+
+
+def _json_str(s: str) -> str:
+    import json
+
+    return json.dumps(s)
+
+
+CONFIG_YAML = (
+    """
 profile: hg-e2e
 persona_skill: {persona_skill}
 task_source: 42L-2212
+"""
+    + LIMITS_YAML
+    + """
 allowlist:
   builtin: [builtin_00]
   plugin: []
@@ -31,24 +67,7 @@ gated_live_tools: {{}}
 state_file: null
 tasks: []
 """
-
-
-class ChatCapableFakeHermes(FakeHermes):
-    """Extends the toolset-gate fake with a `chat -q ... -Q` response."""
-
-    def __init__(self, chat_stdout="answer\nsession_id: abc\n", chat_returncode=0, **kw):
-        super().__init__(**kw)
-        self.chat_stdout = chat_stdout
-        self.chat_returncode = chat_returncode
-
-    def __call__(self, args, timeout=None):
-        cmd = list(args[1:])
-        while len(cmd) >= 2 and cmd[0] in ("--profile", "--skills"):
-            cmd = cmd[2:]
-        if cmd[:1] == ["chat"]:
-            self.calls.append(list(args))
-            return CommandResult(args, self.chat_returncode, self.chat_stdout, "")
-        return super().__call__(args, timeout)
+)
 
 
 def _write_config(home: Path, extra: str = "") -> None:
@@ -57,10 +76,14 @@ def _write_config(home: Path, extra: str = "") -> None:
     (home / "config.yaml").write_text(CONFIG_YAML.format(persona_skill=persona_path) + extra)
 
 
-TASKS_CONFIG_YAML = """
+TASKS_CONFIG_YAML = (
+    """
 profile: hg-e2e
 persona_skill: {persona_skill}
 task_source: 42L-2212
+"""
+    + LIMITS_YAML
+    + """
 allowlist:
   builtin: [builtin_00]
   plugin: []
@@ -72,15 +95,8 @@ tasks:
     destination: null
     auto_execute: false
     prompt: do thing one
-  - task_id: t2
-    destination: null
-    auto_execute: false
-    prompt: do thing two
-  - task_id: t3
-    destination: null
-    auto_execute: false
-    prompt: do thing three
 """
+)
 
 
 def _write_tasks_config(home: Path, state_file) -> None:
@@ -99,37 +115,35 @@ def test_req2_run_log_has_one_grepable_line_per_resolved_task():
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
         _write_tasks_config(home, state_file="null")
-        fake = ChatCapableFakeHermes(chat_stdout="done\nsession_id: x\n")
+        fake_popen = _fake_popen_result(text="done")
 
-        rc = run_instance(home, runner=fake)
+        rc = run_instance(home, runner=FakeHermes(), popen=fake_popen)
         assert rc == EXIT_OK
 
         log_path = next((home / "logs").glob("*.md"))
         text = log_path.read_text()
         task_lines = [l for l in text.splitlines() if l.startswith("- task:")]
-        assert len(task_lines) == 3  # matches the resolved task list's count exactly
+        assert len(task_lines) == 1  # matches the resolved task list's count exactly
         for line in task_lines:
             assert re.search(r"status: \(done|failed|skipped\)$", line)
 
 
 def test_req6_state_file_is_written_back_and_hash_changes_each_run():
     """REQ-6 acceptance: an instance with state_file set must have its hash change after
-    each of two runs."""
+    each of two runs (run_id embedded each time)."""
     import hashlib
 
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
         state_path = home / "state" / "dedup.state"
         _write_tasks_config(home, state_file=f'"{state_path}"')
-        fake1 = ChatCapableFakeHermes(chat_stdout="done\nsession_id: x\n")
 
-        rc1 = run_instance(home, runner=fake1)
+        rc1 = run_instance(home, runner=FakeHermes(), popen=_fake_popen_result())
         assert rc1 == EXIT_OK
         assert state_path.exists()
         hash1 = hashlib.md5(state_path.read_bytes()).hexdigest()
 
-        fake2 = ChatCapableFakeHermes(chat_stdout="done\nsession_id: x\n")
-        rc2 = run_instance(home, runner=fake2)
+        rc2 = run_instance(home, runner=FakeHermes(), popen=_fake_popen_result())
         assert rc2 == EXIT_OK
         hash2 = hashlib.md5(state_path.read_bytes()).hexdigest()
 
@@ -142,16 +156,15 @@ def test_chat_invocation_carries_skills_flag_for_persona():
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
         _write_config(home)
-        fake = ChatCapableFakeHermes(chat_stdout="done\nsession_id: x\n")
+        fake_popen = _fake_popen_result()
 
-        rc = run_instance(home, runner=fake)
+        rc = run_instance(home, runner=FakeHermes(), popen=fake_popen)
 
         assert rc == EXIT_OK
-        chat_calls = [c for c in fake.calls if "chat" in c]
-        assert len(chat_calls) == 1
-        assert "--skills" in chat_calls[0]
-        skills_idx = chat_calls[0].index("--skills")
-        skill_name = chat_calls[0][skills_idx + 1]
+        args = fake_popen.last_args
+        assert "--skills" in args
+        skills_idx = args.index("--skills")
+        skill_name = args[skills_idx + 1]
         assert skill_name.startswith("aa-persona-")
 
 
@@ -159,9 +172,9 @@ def test_clean_run_returns_ok_and_writes_log():
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
         _write_config(home)
-        fake = ChatCapableFakeHermes(chat_stdout="done\nNEXT_TASK_SOURCE: 42L-9999\nsession_id: x\n")
+        fake_popen = _fake_popen_result(text="done\nNEXT_TASK_SOURCE: 42L-9999")
 
-        rc = run_instance(home, runner=fake)
+        rc = run_instance(home, runner=FakeHermes(), popen=fake_popen)
 
         assert rc == EXIT_OK
         logs = list((home / "logs").glob("*.md"))
@@ -176,12 +189,9 @@ def test_session_failure_returns_nonzero_and_does_not_apply_update():
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
         _write_config(home)
-        fake = ChatCapableFakeHermes(
-            chat_stdout="NEXT_TASK_SOURCE: 42L-9999\nsession_id: x\n",
-            chat_returncode=1,
-        )
+        fake_popen = _fake_popen_result(text="NEXT_TASK_SOURCE: 42L-9999", returncode=1)
 
-        rc = run_instance(home, runner=fake)
+        rc = run_instance(home, runner=FakeHermes(), popen=fake_popen)
 
         assert rc == EXIT_SESSION_FAILED
         from hourglass import config as config_mod
@@ -197,32 +207,45 @@ def test_gate_failure_short_circuits_before_invoking_chat():
         def broken_enumerate(args, timeout=None):
             return CommandResult(args, 1, "", "boom")
 
-        rc = run_instance(home, runner=broken_enumerate)
+        popen_calls = []
+
+        def fail_if_called(args, **kwargs):
+            popen_calls.append(args)
+            raise AssertionError("popen must not be invoked after a gate failure")
+
+        rc = run_instance(home, runner=broken_enumerate, popen=fail_if_called)
         assert rc == EXIT_GATE_FAILED
+        assert popen_calls == []
 
 
 def test_second_concurrent_run_is_skipped_not_double_invoked():
-    import threading
-
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
         _write_config(home)
-        fake = ChatCapableFakeHermes()
+        popen_calls = []
+
+        def fail_if_called(args, **kwargs):
+            popen_calls.append(args)
+            raise AssertionError("popen must not be invoked while the lock is held")
 
         from hourglass.locking import instance_lock
         results = []
         with instance_lock(home):
             # A second invocation while the lock is held must be skipped, never double-run.
-            rc = run_instance(home, runner=fake)
+            rc = run_instance(home, runner=FakeHermes(), popen=fail_if_called)
             results.append(rc)
         assert results == [75]  # EXIT_LOCKED
-        assert not any(c[1:2] == ["chat"] for c in fake.calls)
+        assert popen_calls == []
 
 
-DESTINATION_CONFIG_YAML = """
+DESTINATION_CONFIG_YAML = (
+    """
 profile: hg-e2e
 persona_skill: {persona_skill}
 task_source: 42L-2212
+"""
+    + LIMITS_YAML
+    + """
 allowlist:
   builtin: [builtin_00]
   plugin: []
@@ -235,6 +258,7 @@ tasks:
     auto_execute: false
     prompt: write a file
 """
+)
 
 
 def _write_destination_config(home: Path, dest_rel: str) -> None:
@@ -251,15 +275,14 @@ def test_req4_destination_instruction_reaches_the_chat_prompt():
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
         _write_destination_config(home, dest_rel="out/result.txt")
-        fake = ChatCapableFakeHermes(chat_stdout="done\nsession_id: x\n")
+        fake_popen = _fake_popen_result()
 
-        rc = run_instance(home, runner=fake)
+        rc = run_instance(home, runner=FakeHermes(), popen=fake_popen)
         assert rc == EXIT_OK
 
-        chat_calls = [c for c in fake.calls if "chat" in c]
-        assert len(chat_calls) == 1
-        q_idx = chat_calls[0].index("-q")
-        prompt = chat_calls[0][q_idx + 1]
+        args = fake_popen.last_args
+        q_idx = args.index("-q")
+        prompt = args[q_idx + 1]
         assert str(home / "out" / "result.txt") in prompt
         assert "destination" in prompt.lower()
 
@@ -271,9 +294,9 @@ def test_req4_missing_file_destination_is_logged_as_a_warning_not_a_run_failure(
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
         _write_destination_config(home, dest_rel="out/never-written.txt")
-        fake = ChatCapableFakeHermes(chat_stdout="done\nsession_id: x\n")
+        fake_popen = _fake_popen_result()
 
-        rc = run_instance(home, runner=fake)
+        rc = run_instance(home, runner=FakeHermes(), popen=fake_popen)
         assert rc == EXIT_OK  # a missing destination artifact doesn't fail the run itself
 
         log_path = next((home / "logs").glob("*.md"))
@@ -291,9 +314,9 @@ def test_req4_linear_destination_is_flagged_manual_never_silently_passed():
             persona_skill=persona_path, dest_rel="unused"
         ).replace('"file:{dest_rel}"'.format(dest_rel="unused"), '"linear:ENG-9"')
         (home / "config.yaml").write_text(config)
-        fake = ChatCapableFakeHermes(chat_stdout="done\nsession_id: x\n")
+        fake_popen = _fake_popen_result()
 
-        rc = run_instance(home, runner=fake)
+        rc = run_instance(home, runner=FakeHermes(), popen=fake_popen)
         assert rc == EXIT_OK
 
         log_path = next((home / "logs").glob("*.md"))
@@ -313,19 +336,159 @@ def test_req4_linear_issue_destination_reaches_prompt_and_is_flagged_manual():
             persona_skill=persona_path, dest_rel="unused"
         ).replace('"file:unused"', '"linear-issue:42L"')
         (home / "config.yaml").write_text(config)
-        fake = ChatCapableFakeHermes(chat_stdout="done\nsession_id: x\n")
+        fake_popen = _fake_popen_result()
 
-        rc = run_instance(home, runner=fake)
+        rc = run_instance(home, runner=FakeHermes(), popen=fake_popen)
         assert rc == EXIT_OK
 
-        chat_calls = [c for c in fake.calls if "chat" in c]
-        prompt = chat_calls[0][chat_calls[0].index("-q") + 1]
+        args = fake_popen.last_args
+        prompt = args[args.index("-q") + 1]
         assert "save_issue" in prompt
         assert "team '42L'" in prompt
 
         text = next((home / "logs").glob("*.md")).read_text()
         assert "manual verification" in text.lower()
         assert "linear-issue:42L" in text
+
+
+MULTI_TASK_CONFIG_YAML = (
+    """
+profile: hg-e2e
+persona_skill: {persona_skill}
+task_source: 42L-2212
+"""
+    + LIMITS_YAML
+    + """
+allowlist:
+  builtin: [builtin_00]
+  plugin: []
+  mcp: {{}}
+gated_live_tools: {{}}
+state_file: null
+tasks:
+  - task_id: a
+    destination: file:out/a.txt
+    auto_execute: false
+    prompt: ONLY-TASK-A-PROMPT-TEXT
+  - task_id: b
+    destination: file:out/b.txt
+    auto_execute: false
+    prompt: ONLY-TASK-B-PROMPT-TEXT
+"""
+)
+
+
+def _write_multi_task_config(home: Path) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    persona_path = _write_persona_fixture(home)
+    (home / "config.yaml").write_text(MULTI_TASK_CONFIG_YAML.format(persona_skill=persona_path))
+
+
+def test_task_selection():
+    """REQ-1: exactly the named task runs, in a fresh session; its own prompt leads
+    the built prompt; only its own destination enters the gate computation. An
+    unknown id, and a missing id with two declared tasks, both fail before any
+    toolset or agent change (the runner/popen spies record zero calls)."""
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_multi_task_config(home)
+        fake_popen = _fake_popen_result()
+
+        rc = run_instance(home, task_id="a", runner=FakeHermes(), popen=fake_popen)
+        assert rc == EXIT_OK
+        args = fake_popen.last_args
+        q_idx = args.index("-q")
+        prompt = args[q_idx + 1]
+        assert "ONLY-TASK-A-PROMPT-TEXT" in prompt
+        assert "ONLY-TASK-B-PROMPT-TEXT" not in prompt
+
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_multi_task_config(home)
+
+        class SpyRunner(FakeHermes):
+            calls = 0
+
+            def __call__(self, args, timeout=None):
+                SpyRunner.calls += 1
+                return super().__call__(args, timeout=timeout)
+
+        def spy_popen(args, **kwargs):
+            spy_popen.calls = getattr(spy_popen, "calls", 0) + 1
+            return _fake_popen_result()(args, **kwargs)
+
+        rc = run_instance(home, task_id="unknown-id", runner=SpyRunner(), popen=spy_popen)
+        assert rc == EXIT_GATE_FAILED
+        assert SpyRunner.calls == 0
+        assert not hasattr(spy_popen, "calls") or spy_popen.calls == 0
+
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_multi_task_config(home)
+
+        class SpyRunner2(FakeHermes):
+            calls = 0
+
+            def __call__(self, args, timeout=None):
+                SpyRunner2.calls += 1
+                return super().__call__(args, timeout=timeout)
+
+        def spy_popen2(args, **kwargs):
+            spy_popen2.calls = getattr(spy_popen2, "calls", 0) + 1
+            return _fake_popen_result()(args, **kwargs)
+
+        rc = run_instance(home, task_id=None, runner=SpyRunner2(), popen=spy_popen2)
+        assert rc == EXIT_GATE_FAILED
+        assert SpyRunner2.calls == 0
+        assert not hasattr(spy_popen2, "calls") or spy_popen2.calls == 0
+
+
+def test_bad_limits_refused():
+    """REQ-7: a config missing run_timeout_seconds is refused via run_instance itself,
+    names the field in the run record, and never reaches the toolset gate or the agent
+    runner (spy records zero calls)."""
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        home.mkdir(parents=True, exist_ok=True)
+        persona_path = _write_persona_fixture(home)
+        bad_config = (
+            """
+profile: hg-e2e
+persona_skill: {persona_skill}
+task_source: 42L-2212
+limits:
+  max_turns: 50
+  stall_seconds: 420
+allowlist:
+  builtin: [builtin_00]
+  plugin: []
+  mcp: {{}}
+gated_live_tools: {{}}
+state_file: null
+tasks: []
+"""
+        ).format(persona_skill=persona_path)
+        (home / "config.yaml").write_text(bad_config)
+
+        class SpyRunner(FakeHermes):
+            calls = 0
+
+            def __call__(self, args, timeout=None):
+                SpyRunner.calls += 1
+                return super().__call__(args, timeout=timeout)
+
+        def spy_popen(args, **kwargs):
+            spy_popen.calls = getattr(spy_popen, "calls", 0) + 1
+            return _fake_popen_result()(args, **kwargs)
+
+        rc = run_instance(home, runner=SpyRunner(), popen=spy_popen)
+        assert rc == EXIT_GATE_FAILED
+        assert SpyRunner.calls == 0
+        assert not hasattr(spy_popen, "calls") or spy_popen.calls == 0
+
+        log_path = next((home / "logs").glob("*.md"))
+        text = log_path.read_text()
+        assert "run_timeout_seconds" in text
 
 
 def test_req4_malformed_destination_is_skipped_in_prompt_and_logged_as_a_warning():
@@ -341,14 +504,14 @@ def test_req4_malformed_destination_is_skipped_in_prompt_and_logged_as_a_warning
             persona_skill=persona_path, dest_rel="unused"
         ).replace('"file:{dest_rel}"'.format(dest_rel="unused"), '"not-a-valid-destination"')
         (home / "config.yaml").write_text(config)
-        fake = ChatCapableFakeHermes(chat_stdout="done\nsession_id: x\n")
+        fake_popen = _fake_popen_result()
 
-        rc = run_instance(home, runner=fake)
+        rc = run_instance(home, runner=FakeHermes(), popen=fake_popen)
         assert rc == EXIT_OK  # a malformed destination doesn't fail the run itself
 
-        chat_calls = [c for c in fake.calls if "chat" in c]
-        q_idx = chat_calls[0].index("-q")
-        prompt = chat_calls[0][q_idx + 1]
+        args = fake_popen.last_args
+        q_idx = args.index("-q")
+        prompt = args[q_idx + 1]
         assert "not-a-valid-destination" not in prompt  # no destination instruction leaked in
 
         log_path = next((home / "logs").glob("*.md"))

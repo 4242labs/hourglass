@@ -50,3 +50,63 @@ def mcp_list_output(servers):
         excl = f"-{excluded} excluded" if excluded else "all"
         lines.append(f"{name}  stdio  {excl}  {status}")
     return "\n".join(lines)
+
+
+class FakeStdout:
+    """Minimal stand-in for a Popen.stdout pipe: `readline()` pops the next queued
+    line (or '' once exhausted), matching the blocking-readline-returns-'' convention
+    `run_agent_streaming` relies on to detect EOF on a text-mode pipe."""
+
+    def __init__(self, lines):
+        self._lines = list(lines)
+
+    def readline(self):
+        if self._lines:
+            return self._lines.pop(0)
+        return ""
+
+
+class FakePopen:
+    """Stand-in for `subprocess.Popen` used by `cli_utils.run_agent_streaming` tests.
+    `event_lines` are JSONL strings (no trailing newline needed); `returncode` is the
+    exit code reported once the queued lines are exhausted. `on_terminate`/`on_kill`,
+    if given, let a test simulate signal-cooperative vs. signal-ignoring fake agents."""
+
+    def __init__(
+        self,
+        event_lines,
+        returncode=0,
+        pid=424242,
+        on_terminate=None,
+        on_kill=None,
+    ):
+        self.stdout = FakeStdout([line + "\n" for line in event_lines])
+        self.stderr = FakeStdout([])
+        self.returncode = None
+        self._final_returncode = returncode
+        self.pid = pid
+        self._terminated = False
+        self._killed = False
+        self._on_terminate = on_terminate
+        self._on_kill = on_kill
+        self.args = None
+
+    def poll(self):
+        if self._terminated or self._killed or not self.stdout._lines:
+            self.returncode = self._final_returncode
+            return self.returncode
+        return None
+
+    def wait(self, timeout=None):
+        self.returncode = self._final_returncode
+        return self.returncode
+
+    def send_signal_terminate(self):  # invoked by the test's os.kill monkeypatch
+        self._terminated = True
+        if self._on_terminate:
+            self._on_terminate()
+
+    def send_signal_kill(self):
+        self._killed = True
+        if self._on_kill:
+            self._on_kill()

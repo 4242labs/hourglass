@@ -18,12 +18,59 @@ except ImportError:  # pragma: no cover - fallback keeps this module import-safe
     yaml = None
 
 
+class LimitsValidationError(ValueError):
+    """Raised when a `limits` block (instance- or task-level) is missing a required
+    field, has a non-positive/non-integer value, or violates a stated inequality. The
+    caller must abort before any toolset or agent change (REQ-7)."""
+
+
+@dataclass(frozen=True)
+class Limits:
+    run_timeout_seconds: int
+    max_turns: int
+    stall_seconds: int
+    grace_seconds: int = 30  # Kubernetes' own terminationGracePeriodSeconds default (§2 citation)
+
+
+_REQUIRED_LIMITS_FIELDS = ("run_timeout_seconds", "max_turns", "stall_seconds")
+
+
+def _is_positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _validate_limits(data: Dict[str, Any], context: str) -> None:
+    for field_name in _REQUIRED_LIMITS_FIELDS:
+        if field_name not in data:
+            raise LimitsValidationError(f"{context}: missing required limits field '{field_name}'")
+        if not _is_positive_int(data[field_name]):
+            raise LimitsValidationError(
+                f"{context}: limits field '{field_name}' must be a positive integer, got {data[field_name]!r}"
+            )
+    if "grace_seconds" in data and not _is_positive_int(data["grace_seconds"]):
+        raise LimitsValidationError(
+            f"{context}: limits field 'grace_seconds' must be a positive integer, got {data['grace_seconds']!r}"
+        )
+    run_timeout = data["run_timeout_seconds"]
+    stall = data["stall_seconds"]
+    if stall >= run_timeout:
+        raise LimitsValidationError(
+            f"{context}: stall_seconds ({stall}) must be < run_timeout_seconds ({run_timeout})"
+        )
+    grace = data.get("grace_seconds", 30)
+    if grace + 3 >= run_timeout:
+        raise LimitsValidationError(
+            f"{context}: grace_seconds ({grace}) + 3 must be < run_timeout_seconds ({run_timeout})"
+        )
+
+
 @dataclass
 class Task:
     task_id: str
     destination: Optional[str] = None  # toolset or MCP server name this task's output uses
     auto_execute: bool = False
     prompt: str = ""
+    limits_override: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -32,6 +79,7 @@ class InstanceConfig:
     profile: str
     persona_skill: str
     task_source: str
+    limits: Limits
     allowlist_builtin: Set[str] = field(default_factory=set)
     allowlist_plugin: Set[str] = field(default_factory=set)
     allowlist_mcp: Dict[str, Set[str]] = field(default_factory=dict)
@@ -46,6 +94,21 @@ class InstanceConfig:
     def set_task_source(self, value: str) -> None:
         self.task_source = value
         self._persist()
+
+    def effective_limits(self, task: Optional[Task]) -> Limits:
+        """REQ-7: a per-task `limits` override wins field-by-field over the instance
+        default; re-validated only when an override is actually present (the
+        instance-level block is already validated at load time)."""
+        merged: Dict[str, Any] = {
+            "run_timeout_seconds": self.limits.run_timeout_seconds,
+            "max_turns": self.limits.max_turns,
+            "stall_seconds": self.limits.stall_seconds,
+            "grace_seconds": self.limits.grace_seconds,
+        }
+        if task is not None and task.limits_override:
+            merged.update(task.limits_override)
+            _validate_limits(merged, context=f"task '{task.task_id}' effective limits")
+        return Limits(**merged)
 
     def _persist(self) -> None:
         data = _to_raw(self)
@@ -78,11 +141,24 @@ def _from_raw(instance_home: Path, raw: Dict[str, Any]) -> InstanceConfig:
     gated_raw = raw.get("gated_live_tools", {}) or {}
     tasks_raw = raw.get("tasks", []) or []
     state_file = raw.get("state_file")
+
+    limits_raw = raw.get("limits")
+    if limits_raw is None:
+        raise LimitsValidationError("instance config: missing required 'limits' block")
+    _validate_limits(limits_raw, context="instance limits")
+    limits = Limits(
+        run_timeout_seconds=limits_raw["run_timeout_seconds"],
+        max_turns=limits_raw["max_turns"],
+        stall_seconds=limits_raw["stall_seconds"],
+        grace_seconds=limits_raw.get("grace_seconds", 30),
+    )
+
     return InstanceConfig(
         instance_home=instance_home,
         profile=raw["profile"],
         persona_skill=raw["persona_skill"],
         task_source=raw["task_source"],
+        limits=limits,
         allowlist_builtin=set(allow.get("builtin", [])),
         allowlist_plugin=set(allow.get("plugin", [])),
         allowlist_mcp={k: set(v) for k, v in mcp_raw.items()},
@@ -94,6 +170,7 @@ def _from_raw(instance_home: Path, raw: Dict[str, Any]) -> InstanceConfig:
                 destination=t.get("destination"),
                 auto_execute=bool(t.get("auto_execute", False)),
                 prompt=t.get("prompt", ""),
+                limits_override=dict(t.get("limits") or {}),
             )
             for t in tasks_raw
         ],
@@ -105,6 +182,12 @@ def _to_raw(cfg: InstanceConfig) -> Dict[str, Any]:
         "profile": cfg.profile,
         "persona_skill": cfg.persona_skill,
         "task_source": cfg.task_source,
+        "limits": {
+            "run_timeout_seconds": cfg.limits.run_timeout_seconds,
+            "max_turns": cfg.limits.max_turns,
+            "stall_seconds": cfg.limits.stall_seconds,
+            "grace_seconds": cfg.limits.grace_seconds,
+        },
         "allowlist": {
             "builtin": sorted(cfg.allowlist_builtin),
             "plugin": sorted(cfg.allowlist_plugin),
@@ -118,6 +201,7 @@ def _to_raw(cfg: InstanceConfig) -> Dict[str, Any]:
                 "destination": t.destination,
                 "auto_execute": t.auto_execute,
                 "prompt": t.prompt,
+                "limits": dict(t.limits_override) if t.limits_override else None,
             }
             for t in cfg.tasks
         ],

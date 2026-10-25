@@ -12,6 +12,10 @@ CONFIG_YAML = """
 profile: hg-test-instance
 persona_skill: macgyver
 task_source: 42L-2212
+limits:
+  run_timeout_seconds: 1200
+  max_turns: 50
+  stall_seconds: 420
 allowlist:
   builtin: [file]
   plugin: []

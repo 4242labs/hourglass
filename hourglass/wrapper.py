@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import signal
 import subprocess
 import uuid
 from pathlib import Path
@@ -171,15 +172,30 @@ def _run_once(instance_home: Path, task_id: Optional[str], runner, popen) -> int
             env["HOURGLASS_DEADLINE_EPOCH"] = str(deadline_epoch)
             env["HOURGLASS_HARD_DEADLINE_EPOCH"] = str(hard_deadline_epoch)
 
-            agent_result: AgentRunResult = run_agent_streaming(
-                args,
-                env=env,
-                run_timeout_seconds=limits.run_timeout_seconds,
-                grace_seconds=limits.grace_seconds,
-                stall_seconds=limits.stall_seconds,
-                events_path=log.events_path(instance_home),
-                popen=popen,
-            )
+            # REQ-6: an external SIGTERM delivered to Hourglass itself is treated the
+            # same as the REQ-4 time-cap path — the agent subprocess is staged-stopped
+            # and the run is recorded "Hourglass terminated", not left to die uncleanly
+            # alongside Hourglass's own default SIGTERM disposition.
+            external_stop = {"flag": False}
+            previous_handler = signal.getsignal(signal.SIGTERM)
+
+            def _on_sigterm(signum, frame):  # noqa: ANN001 - signal handler signature
+                external_stop["flag"] = True
+
+            signal.signal(signal.SIGTERM, _on_sigterm)
+            try:
+                agent_result: AgentRunResult = run_agent_streaming(
+                    args,
+                    env=env,
+                    run_timeout_seconds=limits.run_timeout_seconds,
+                    grace_seconds=limits.grace_seconds,
+                    stall_seconds=limits.stall_seconds,
+                    events_path=log.events_path(instance_home),
+                    external_stop_flag=lambda: external_stop["flag"],
+                    popen=popen,
+                )
+            finally:
+                signal.signal(signal.SIGTERM, previous_handler)
     except persona_mod.PersonaLoadError as exc:
         log.record_warning(f"persona load failed: {exc}")
         log.write(instance_home)

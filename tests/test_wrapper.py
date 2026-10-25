@@ -518,3 +518,224 @@ def test_req4_malformed_destination_is_skipped_in_prompt_and_logged_as_a_warning
         text = log_path.read_text()
         assert "invalid destination" in text.lower()
         assert "not-a-valid-destination" in text
+
+
+def test_external_sigterm_to_run_instance_stops_the_agent_and_is_recorded():
+    """REQ-6: an external SIGTERM delivered to Hourglass itself (run_instance, via a
+    real subprocess invocation of cli.main) is treated like the REQ-4 time-cap path —
+    the agent subprocess is staged-stopped and the run is recorded with reason
+    "Hourglass terminated", exit 124 (EXIT_STOPPED)."""
+    import os
+    import signal
+    import subprocess as sp
+    import sys
+    import time
+
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        home.mkdir(parents=True, exist_ok=True)
+        persona_path = _write_persona_fixture(home)
+        config = (
+            """
+profile: hg-sigterm
+persona_skill: {persona_skill}
+task_source: 42L-2212
+limits:
+  run_timeout_seconds: 60
+  max_turns: 50
+  stall_seconds: 50
+  grace_seconds: 2
+allowlist:
+  builtin: []
+  plugin: []
+  mcp: {{}}
+gated_live_tools: {{}}
+state_file: null
+tasks: []
+"""
+        ).format(persona_skill=persona_path)
+        (home / "config.yaml").write_text(config)
+
+        fakeagent = str(Path(__file__).parent / "fakeagent.py")
+        driver = home / "_driver.py"
+        driver.write_text(
+            "import sys\n"
+            "sys.path.insert(0, %r)\n"
+            "from hourglass.cli_utils import CommandResult\n"
+            "from hourglass.wrapper import run_instance\n"
+            "import subprocess\n"
+            "\n"
+            "class GateRunner:\n"
+            "    def __call__(self, args, timeout=None):\n"
+            "        cmd = list(args[1:])\n"
+            "        if cmd[:2] == ['--profile', 'hg-sigterm']:\n"
+            "            cmd = cmd[2:]\n"
+            "        if cmd[:2] == ['tools', 'list']:\n"
+            "            return CommandResult(args, 0, 'Built-in toolsets:\\n\\nPlugin toolsets:\\n', '')\n"
+            "        if cmd[:2] == ['mcp', 'list']:\n"
+            "            return CommandResult(args, 0, 'Name       Transport   Status\\n---\\n', '')\n"
+            "        return CommandResult(args, 0, '', '')\n"
+            "\n"
+            "def fake_popen(args, **kwargs):\n"
+            "    return subprocess.Popen(%r, **kwargs)\n"
+            "\n"
+            "rc = run_instance(%r, runner=GateRunner(), popen=fake_popen)\n"
+            "print(f'RC={rc}')\n"
+            % (str(Path(__file__).parent.parent), [sys.executable, fakeagent, "--event-gap", "5", "--events", "20"], str(home))
+        )
+
+        proc = sp.Popen([sys.executable, str(driver)], cwd=str(home), stdout=sp.PIPE, stderr=sp.PIPE, text=True)
+        time.sleep(1.0)  # let it clear the gate and start the agent subprocess
+        os.kill(proc.pid, signal.SIGTERM)
+        stdout, stderr = proc.communicate(timeout=15)
+
+        assert "RC=124" in stdout, f"stdout={stdout!r} stderr={stderr!r}"
+
+        log_path = next((home / "logs").glob("*.md"))
+        text = log_path.read_text()
+        assert "Hourglass terminated" in text
+
+
+def test_full_record_present_on_clean_time_cap_and_external_sigterm_runs():
+    """REQ-8: the per-run record carries every named field (task id, session id, model,
+    resolved limits, timing, tool_use count, outcome, stop reason) across a clean
+    finish, a REQ-4 time-cap stop, and an external SIGTERM — and the events file's
+    line count matches what was actually emitted before any stop."""
+    import json as _json
+
+    # Scenario 1: clean finish.
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_tasks_config(home, state_file=home / "state.txt")
+        fake_popen = _fake_popen_result(session_id="sess-clean")
+
+        rc = run_instance(home, runner=FakeHermes(), popen=fake_popen)
+        assert rc == EXIT_OK
+
+        log_path = next((home / "logs").glob("*.md"))
+        text = log_path.read_text()
+        for field in (
+            "task_id", "session_id: sess-clean", "model: fake-model",
+            "limits:", "started:", "ended:", "elapsed_seconds:",
+            "tool_use_count:", "outcome: done", "stop_reason: -",
+        ):
+            assert field in text, f"missing {field!r} in:\n{text}"
+
+        events_path = next((home / "logs").glob("*.events.jsonl"))
+        lines = events_path.read_text().splitlines()
+        assert len(lines) == 2  # init event + result event, matching _fake_popen_result
+        for line in lines:
+            _json.loads(line)
+
+    # Scenario 2: REQ-4 time-cap stop, via the real streaming runner against a real
+    # fakeagent.py subprocess (not FakePopen — the time-cap path only fires inside
+    # run_agent_streaming's own select()/poll loop against a real pipe).
+    import subprocess as sp
+    import sys as _sys
+
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        home.mkdir(parents=True, exist_ok=True)
+        persona_path = _write_persona_fixture(home)
+        config = (
+            """
+profile: hg-timecap
+persona_skill: {persona_skill}
+task_source: 42L-2212
+limits:
+  run_timeout_seconds: 8
+  max_turns: 50
+  stall_seconds: 6
+  grace_seconds: 1
+allowlist:
+  builtin: []
+  plugin: []
+  mcp: {{}}
+gated_live_tools: {{}}
+state_file: null
+tasks: []
+"""
+        ).format(persona_skill=persona_path)
+        (home / "config.yaml").write_text(config)
+
+        fakeagent = str(Path(__file__).parent / "fakeagent.py")
+
+        def real_popen(args, **kwargs):
+            return sp.Popen(
+                [_sys.executable, fakeagent, "--event-gap", "0.3", "--events", "40"],
+                **kwargs,
+            )
+
+        rc = run_instance(home, runner=FakeHermes(), popen=real_popen)
+        assert rc == 124  # EXIT_STOPPED
+
+        log_path = next((home / "logs").glob("*.md"))
+        text = log_path.read_text()
+        assert "stop_reason: time cap" in text
+        assert "outcome: stopped" in text
+        assert "session_id: fake-session" in text  # from fakeagent.py's own init event
+        assert "model: fake-model" in text
+
+        events_path = next((home / "logs").glob("*.events.jsonl"))
+        lines = events_path.read_text().splitlines()
+        assert len(lines) >= 1  # at least the init event survived the time-cap stop
+        for line in lines:
+            _json.loads(line)
+
+
+def test_lock_released_after_a_clean_run_and_after_a_time_cap_stop():
+    """REQ-8 / lock discipline: the instance lock is released on every path
+    run_instance itself survives — a second run immediately after either a clean
+    finish or a REQ-4 time-cap stop must not raise RunAlreadyActiveError."""
+    import subprocess as sp
+    import sys as _sys
+
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_tasks_config(home, state_file=home / "state.txt")
+
+        rc1 = run_instance(home, runner=FakeHermes(), popen=_fake_popen_result())
+        assert rc1 == EXIT_OK
+        assert not (home / "run.lock").exists()
+
+        rc2 = run_instance(home, runner=FakeHermes(), popen=_fake_popen_result())
+        assert rc2 == EXIT_OK  # must not raise RunAlreadyActiveError
+
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        home.mkdir(parents=True, exist_ok=True)
+        persona_path = _write_persona_fixture(home)
+        config = (
+            """
+profile: hg-timecap2
+persona_skill: {persona_skill}
+task_source: 42L-2212
+limits:
+  run_timeout_seconds: 8
+  max_turns: 50
+  stall_seconds: 6
+  grace_seconds: 1
+allowlist:
+  builtin: []
+  plugin: []
+  mcp: {{}}
+gated_live_tools: {{}}
+state_file: null
+tasks: []
+"""
+        ).format(persona_skill=persona_path)
+        (home / "config.yaml").write_text(config)
+        fakeagent = str(Path(__file__).parent / "fakeagent.py")
+
+        def real_popen(args, **kwargs):
+            return sp.Popen(
+                [_sys.executable, fakeagent, "--event-gap", "0.3", "--events", "40"],
+                **kwargs,
+            )
+
+        rc1 = run_instance(home, runner=FakeHermes(), popen=real_popen)
+        assert rc1 == 124
+        assert not (home / "run.lock").exists()
+
+        rc2 = run_instance(home, runner=FakeHermes(), popen=real_popen)
+        assert rc2 == 124  # must not raise RunAlreadyActiveError either

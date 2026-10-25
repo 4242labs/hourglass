@@ -11,6 +11,7 @@ import datetime as _dt
 import os
 import signal
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -55,7 +56,7 @@ def run_instance(
         with instance_lock(instance_home):
             return _run_once(instance_home, task_id, runner, popen)
     except RunAlreadyActiveError as exc:
-        print(f"hourglass: {exc}")
+        print(f"hourglass: {exc}", file=sys.stderr)
         return EXIT_LOCKED
 
 
@@ -88,7 +89,7 @@ def _run_once(instance_home: Path, task_id: Optional[str], runner, popen) -> int
     except config_mod.LimitsValidationError as exc:
         log.record_warning(f"limits validation failed: {exc}")
         log.write(instance_home)
-        print(f"hourglass: {task_id or '<none>'} failed: {exc}")
+        print(f"hourglass: {task_id or '<none>'} failed: {exc}", file=sys.stderr)
         return EXIT_GATE_FAILED
 
     # REQ-1: task selection happens before any toolset or agent change.
@@ -96,7 +97,7 @@ def _run_once(instance_home: Path, task_id: Optional[str], runner, popen) -> int
     if select_error is not None:
         log.record_warning(f"task selection failed: {select_error}")
         log.write(instance_home)
-        print(f"hourglass: {task_id or '<none>'} failed: {select_error}")
+        print(f"hourglass: {task_id or '<none>'} failed: {select_error}", file=sys.stderr)
         return EXIT_GATE_FAILED
 
     run_tasks = [selected_task] if selected_task is not None else list(cfg.tasks)
@@ -107,7 +108,7 @@ def _run_once(instance_home: Path, task_id: Optional[str], runner, popen) -> int
     except config_mod.LimitsValidationError as exc:
         log.record_warning(f"limits validation failed: {exc}")
         log.write(instance_home)
-        print(f"hourglass: {task_id or '<none>'} failed: {exc}")
+        print(f"hourglass: {task_id or '<none>'} failed: {exc}", file=sys.stderr)
         return EXIT_GATE_FAILED
 
     register_subreaper()  # REQ-6, Linux only; no-op elsewhere
@@ -242,7 +243,7 @@ def _run_once(instance_home: Path, task_id: Optional[str], runner, popen) -> int
         "ok" if clean_exit else f"agent exit {agent_result.returncode}"
     )
     task_label = run_tasks[0].task_id if run_tasks else "<none>"
-    print(f"hourglass: {task_label} {outcome}: {stderr_reason}")
+    print(f"hourglass: {task_label} {outcome}: {stderr_reason}", file=sys.stderr)
 
     if stopped_early:
         return EXIT_STOPPED

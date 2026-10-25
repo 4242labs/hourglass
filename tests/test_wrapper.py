@@ -530,6 +530,7 @@ def test_external_sigterm_to_run_instance_stops_the_agent_and_is_recorded():
     import subprocess as sp
     import sys
     import time
+    import re
 
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
@@ -590,10 +591,40 @@ tasks: []
         stdout, stderr = proc.communicate(timeout=15)
 
         assert "RC=124" in stdout, f"stdout={stdout!r} stderr={stderr!r}"
+        assert re.search(r"^hourglass: \S+ \S+: .+$", stderr, re.MULTILINE), (
+            f"REQ-8 stderr contract not found on the stderr stream: stderr={stderr!r}"
+        )
 
         log_path = next((home / "logs").glob("*.md"))
         text = log_path.read_text()
         assert "Hourglass terminated" in text
+
+
+def test_run_end_line_goes_to_stderr_not_stdout():
+    """Spec: 'the last line Hourglass itself writes to stderr is
+    `hourglass: <task_id> <outcome>: <reason>`.' Must be on fd 2, never fd 1 —
+    Dagu's step-log API (Block 02 REQ-8) reads stdout and stderr as separate
+    streams and only checks stderr for this line."""
+    import contextlib
+    import io
+    import re
+
+    with tempfile.TemporaryDirectory() as d:
+        home = Path(d)
+        _write_config(home)
+        fake_popen = _fake_popen_result(text="done")
+
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = run_instance(home, runner=FakeHermes(), popen=fake_popen)
+
+        assert rc == EXIT_OK
+        assert re.search(r"^hourglass: \S+ \S+: .+$", err.getvalue(), re.MULTILINE), (
+            f"missing/misplaced REQ-8 stderr contract line: stderr={err.getvalue()!r}"
+        )
+        assert "hourglass:" not in out.getvalue(), (
+            f"the run-end line leaked onto stdout (must be stderr-only): stdout={out.getvalue()!r}"
+        )
 
 
 def test_full_record_present_on_clean_time_cap_and_external_sigterm_runs():

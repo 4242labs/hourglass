@@ -99,8 +99,14 @@ def test_max_turns_flag_reaches_built_argv():
         assert captured_args["args"][idx + 1] == "37"
 
 
-def test_run_budget_flag_reaches_built_argv():
-    """REQ-3: --run-budget <run_timeout_seconds> is passed as a cooperative hint."""
+def test_run_budget_flag_is_not_passed_to_hermes():
+    """REQ-3 (revised): `--run-budget` is intentionally omitted from the built argv.
+    Some hermes builds list it in --help but reject it at the gateway layer with
+    "Unsupported gateway CLI options: --run-budget", failing every run instantly
+    (reproduced live on a real host). Spec §3 already states Hourglass does not rely
+    on this flag for enforcement — it was only ever a best-effort cooperative hint on
+    top of Hourglass's own external SIGTERM/SIGKILL deadline, which is unaffected by
+    its removal. Mutation proof: re-adding the flag here turns this test red."""
     with tempfile.TemporaryDirectory() as d:
         home = Path(d)
         _write_config(home, run_timeout_seconds=1200)
@@ -112,8 +118,7 @@ def test_run_budget_flag_reaches_built_argv():
 
         rc = run_instance(home, runner=GatePassingFakeRunner(), popen=fake_popen)
         assert rc == EXIT_OK
-        idx = captured_args["args"].index("--run-budget")
-        assert captured_args["args"][idx + 1] == "1200"
+        assert "--run-budget" not in captured_args["args"]
 
 
 def test_deadline_exported_in_env_1200s_cap():

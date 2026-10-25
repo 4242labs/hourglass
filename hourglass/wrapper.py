@@ -154,6 +154,12 @@ def _run_once(instance_home: Path, task_id: Optional[str], runner, popen) -> int
 
     try:
         with persona_mod.persona_skill(cfg.profile, Path(cfg.persona_skill)) as skill_name:
+            # `--run-budget` is intentionally omitted: this host's `hermes` CLI lists it
+            # in `--help` but its gateway layer rejects it as an unsupported option,
+            # failing every run instantly with exit 2. Hourglass already enforces the
+            # same wall-clock cap itself (HOURGLASS_DEADLINE_EPOCH / staged SIGTERM then
+            # SIGKILL below), so the flag was pure redundant belt-and-suspenders, not
+            # load-bearing — dropping it is safe.
             args = hermes_args(
                 cfg.profile,
                 "chat",
@@ -164,8 +170,6 @@ def _run_once(instance_home: Path, task_id: Optional[str], runner, popen) -> int
                 "stream-json",
                 "--max-turns",
                 str(limits.max_turns),
-                "--run-budget",
-                str(limits.run_timeout_seconds),
                 skills=skill_name,
             )
             env = dict(os.environ)

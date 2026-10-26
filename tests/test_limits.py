@@ -1,4 +1,16 @@
-"""REQ-2/REQ-3: tool-call iteration cap, agent deadline export, --run-budget wiring."""
+"""REQ-2/REQ-3: tool-call iteration cap, agent deadline export.
+
+`--run-budget` is intentionally NOT wired into the built argv as of 2026-10-25: this
+host's installed hermes CLI lists it in `--help` but its gateway layer rejects it at
+runtime with "Unsupported gateway CLI options: --run-budget", failing every agent
+invocation instantly (exit 2) before any tool use. Confirmed live on a real
+Dagu-triggered production run (see hourglass-meta/specs/block-01-run-limits-and-cleanup.md
+REQ-3 and logs/session-261025-block-02-dagu-run-budget-bug.md for the full incident).
+REQ-3's actual guarantee — the agent is told its deadline and Hourglass enforces it
+externally via staged SIGTERM/SIGKILL (REQ-4/cli_utils.py) — is unaffected by this
+flag's removal; it was always documented in the spec as a cooperative, non-load-bearing
+hint layered on top of that external enforcement, never the enforcement itself.
+"""
 from __future__ import annotations
 
 import tempfile
